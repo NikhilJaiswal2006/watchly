@@ -73,6 +73,91 @@ export default function RoomPage() {
     setRoom(data.room || data);
   };
 
+  // socket useeffect
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      navigate("/login", { replace: true });
+      return;
+    }
+
+    socket.auth = { token };
+
+    const handleConnect = () => {
+      console.log("Watchly Socket connected:", socket.id);
+    };
+
+    const handleConnectError = (error) => {
+      console.error("Socket connection error:", error.message);
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("connect_error", handleConnectError);
+    socket.connect();
+
+    return () => {
+      socket.off("connect", handleConnect);
+      socket.off("connect_error", handleConnectError);
+      socket.disconnect();
+    };
+  }, [navigate]);
+
+  useEffect(() => {
+    if (!room?.roomId) return;
+
+    const joinRoom = () => {
+      socket.emit("room:join", { roomCode: room.roomId }, (result) => {
+        if (!result?.success) {
+          console.error("Room chat join failed:", result?.message);
+        } else {
+          console.log("Joined room chat:", result.roomCode);
+        }
+      });
+    };
+
+    const handleMessage = (message) => {
+      setChatMessages((previous) => {
+        // Avoid duplicate messages.
+        if (previous.some((item) => item.id === message.id)) {
+          return previous;
+        }
+
+        return [...previous, message];
+      });
+    };
+
+    const handleAnnouncement = (announcement) => {
+      setAnnouncements((previous) => {
+        if (previous.some((item) => item.id === announcement.id)) {
+          return previous;
+        }
+
+        return [...previous, announcement];
+      });
+    };
+
+    socket.on("room:announcement", handleAnnouncement);
+
+    socket.on("connect", joinRoom);
+    socket.on("room:chat:message", handleMessage);
+
+    if (socket.connected) {
+      joinRoom();
+    }
+
+    return () => {
+      socket.off("connect", joinRoom);
+      socket.off("room:chat:message", handleMessage);
+      return () => {
+        socket.off("connect", joinRoom);
+        socket.off("room:chat:message", handleMessage);
+        socket.off("room:announcement", handleAnnouncement);
+      };
+    };
+  }, [room?.roomId]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -288,56 +373,25 @@ export default function RoomPage() {
     };
 
     const handlePlayback = ({ state, time }) => {
-      setRoom((previous) => {
-        if (!previous) return previous;
-
-        return {
-          ...previous,
-          isPlaying: state === "playing",
-          currentTime: Number.isFinite(time) ? time : previous.currentTime,
-        };
-      });
-
       const player = viewerPlayerRef.current;
       if (!player) return;
 
-      try {
-        const currentTime = player.getCurrentTime();
+      const currentTime = player.getCurrentTime();
 
-        if (
-          Number.isFinite(time) &&
-          Math.abs(currentTime - time) > 2
-        ) {
-          player.seekTo(time, true);
-        }
+      if (Math.abs(currentTime - time) > 2) {
+        player.seekTo(time, true);
+      }
 
-        if (state === "playing") {
-          player.playVideo();
-        } else if (state === "paused") {
-          player.pauseVideo();
-        }
-      } catch (error) {
-        console.error("Unable to synchronize viewer playback:", error);
+      if (state === "playing") {
+        player.playVideo();
+      } else if (state === "paused") {
+        player.pauseVideo();
       }
     };
-
-const handleVideoChanged = ({ videoId }) => {
-  if (!videoId) return;
-
-  setRoom((previous) => ({
-    ...previous,
-    videoId,
-    currentTime: 0,
-    isPlaying: false,
-  }));
-};
-
-
 
     socket.on("connect", joinRoom);
     socket.on("room:chat:message", handleMessage);
     socket.on("room:playback", handlePlayback);
-    socket.on("room:video:changed", handleVideoChanged);
 
     if (socket.connected) {
       joinRoom();
@@ -347,7 +401,6 @@ const handleVideoChanged = ({ videoId }) => {
       socket.off("connect", joinRoom);
       socket.off("room:chat:message", handleMessage);
       socket.off("room:playback", handlePlayback);
-      socket.off("room:video:changed", handleVideoChanged);
     };
   }, [room?.roomId]);
 
@@ -458,7 +511,6 @@ const handleVideoChanged = ({ videoId }) => {
             <div className="wt-video-frame">
               {room.videoId ? (
                 <YouTube
-                  key={room.videoId}
                   videoId={room.videoId}
                   opts={{
                     width: "100%",
@@ -770,7 +822,6 @@ const handleVideoChanged = ({ videoId }) => {
               {room.videoId ? (
                 <div className="viewer-video-wrapper">
                   <YouTube
-                    key={room.videoId}
                     videoId={room.videoId}
                     opts={{
                       width: "100%",
@@ -1001,7 +1052,7 @@ function ChatBox({ messages, chatInput, setChatInput, sendChatMessage }) {
         </button>
       </form>
       <p className="wt-chat-disclaimer">
-        Live room chat · Messages are shared with everyone in this room
+        Local demo chat · Not synced between users yet
       </p>
     </div>
   );

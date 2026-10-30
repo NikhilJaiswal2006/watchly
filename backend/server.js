@@ -10,49 +10,25 @@ const dotenv = require("dotenv");
 
 const Authmiddleware = require("./middleware/Auth.middleware");
 
+
 dotenv.config({ path: ".env" });
 
 const app = express();
 const server = http.createServer(app);
 
-const port = process.env.PORT || 3000;
-const mongoURL = process.env.MONGO_URL;
-
-// Configure the deployed frontend URL in Render as FRONTEND_URL.
-// Multiple origins can be separated with commas.
-const allowedOrigins = [
-  "https://watchly-sepia.vercel.app",
-  ...(process.env.FRONTEND_URL || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
-];
-
-const corsOptions = {
-  origin(origin, callback) {
-    // Allow server-to-server tools and requests without an Origin header.
-    if (!origin || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error("Not allowed by CORS"));
-  },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-  credentials: true,
-};
-
+// Middleware
 app.use(express.json());
-app.use(cors(corsOptions));
+app.use(cors());
 
 // Socket.IO setup
 const io = new Server(server, {
-  cors: corsOptions,
+  cors: {
+    origin: "*", // Development only
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+  },
 });
 
-// Make Socket.IO available to controllers, including updateRoomVideo.
-app.set("io", io);
 
-// Authenticate every Socket.IO connection using the same JWT secret.
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
@@ -70,7 +46,7 @@ io.use(async (socket, next) => {
       decoded._id ||
       decoded.sub;
 
-    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+    if (!userId) {
       return next(new Error("Invalid token payload"));
     }
 
@@ -81,20 +57,40 @@ io.use(async (socket, next) => {
     }
 
     socket.data.userId = String(user._id);
-    socket.data.username = user.name || "User";
+    socket.data.username = user.name;
 
-    return next();
+    next();
   } catch (error) {
     console.error("Socket authentication error:", error.message);
-    return next(new Error("Authentication failed"));
+    next(new Error("Authentication failed"));
   }
 });
 
-// Routes
+
+
+// MongoDB configuration
+const port = process.env.PORT || 3000;
+const mongoURL = process.env.MONGO_URL;
+
+// Existing routes
 const registeruser = require("./routes/register.route");
 const loginuser = require("./routes/login.route");
 const roomRoutes = require("./routes/room.route");
 
+// MongoDB connection
+const connectDB = async () => {
+  try {
+    await mongoose.connect(mongoURL);
+    console.log("MongoDB connected successfully");
+  } catch (error) {
+    console.error("Database connection error:", error.message);
+    process.exit(1);
+  }
+};
+
+connectDB();
+
+// API routes — preserved
 app.use("/api/users", registeruser);
 app.use("/api/users", loginuser);
 app.use("/api/rooms", roomRoutes);
@@ -111,7 +107,8 @@ app.get("/api/profile", Authmiddleware, (req, res) => {
   });
 });
 
-// Socket.IO events
+// Socket.IO connection test
+
 io.on("connection", (socket) => {
   console.log(
     "Authenticated socket connected:",
@@ -120,7 +117,21 @@ io.on("connection", (socket) => {
     socket.data.userId
   );
 
-  // Join only rooms where the authenticated user is a host or participant.
+socket.on("room:playback", (payload = {}) => {
+  const roomCode = String(payload.roomCode || "").trim();
+
+  if (!roomCode || socket.data.roomCode !== roomCode) {
+    return;
+  }
+
+  socket.to(roomCode).emit("room:playback", {
+    state: payload.state,
+    time: Number(payload.time) || 0,
+  });
+});
+
+
+  // Join a room after verifying membership
   socket.on("room:join", async (payload = {}, callback) => {
     const ack = typeof callback === "function" ? callback : () => {};
 
@@ -140,7 +151,7 @@ io.on("connection", (socket) => {
       const userId = socket.data.userId;
       const isHost = String(room.hostId) === userId;
       const isParticipant = room.participants.some(
-        (participant) => String(participant.userId) === userId
+        (p) => String(p.userId) === userId
       );
 
       if (!isHost && !isParticipant) {
@@ -150,44 +161,24 @@ io.on("connection", (socket) => {
         });
       }
 
+      // Leave previous room, if any
       if (socket.data.roomCode) {
         socket.leave(socket.data.roomCode);
       }
 
-      await socket.join(roomCode);
+      socket.join(roomCode);
       socket.data.roomCode = roomCode;
 
-      console.log(`${userId} joined room: ${roomCode}`);
+      console.log(`${userId} joined room chat: ${roomCode}`);
+
       return ack({ success: true, roomCode });
     } catch (error) {
       console.error("Room join error:", error.message);
-      return ack({ success: false, message: "Unable to join room" });
+      return ack({ success: false, message: "Unable to join room chat" });
     }
   });
 
-  // Broadcast host playback updates to the other members in the joined room.
-  socket.on("room:playback", (payload = {}) => {
-    const roomCode = String(payload.roomCode || "").trim();
-
-    if (!roomCode || socket.data.roomCode !== roomCode) {
-      return;
-    }
-
-    const validStates = ["playing", "paused"];
-    const state = payload.state;
-    const time = Number(payload.time);
-
-    if (!validStates.includes(state) || !Number.isFinite(time) || time < 0) {
-      return;
-    }
-
-    socket.to(roomCode).emit("room:playback", {
-      state,
-      time,
-    });
-  });
-
-  // Send a message to the current room.
+  // Send a message to the current room
   socket.on("room:chat:send", async (payload = {}, callback) => {
     const ack = typeof callback === "function" ? callback : () => {};
 
@@ -217,12 +208,13 @@ io.on("connection", (socket) => {
       const userId = socket.data.userId;
       const isHost = String(room.hostId) === userId;
       const isParticipant = room.participants.some(
-        (participant) => String(participant.userId) === userId
+        (p) => String(p.userId) === userId
       );
 
       if (!isHost && !isParticipant) {
         socket.leave(roomCode);
         socket.data.roomCode = null;
+
         return ack({ success: false, message: "Room access denied" });
       }
 
@@ -238,6 +230,7 @@ io.on("connection", (socket) => {
       };
 
       io.to(roomCode).emit("room:chat:message", message);
+
       return ack({ success: true });
     } catch (error) {
       console.error("Chat send error:", error.message);
@@ -245,7 +238,8 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Only the room host can send announcements.
+  
+  // Host-only room announcements
   socket.on("room:announcement:send", async (payload = {}, callback) => {
     const ack = typeof callback === "function" ? callback : () => {};
 
@@ -253,10 +247,15 @@ io.on("connection", (socket) => {
       const roomCode = String(payload.roomCode || "").trim();
       const announcementText = String(payload.text || "").trim();
 
+      // Verify that the socket has joined this room
       if (!roomCode || socket.data.roomCode !== roomCode) {
-        return ack({ success: false, message: "Join the room first" });
+        return ack({
+          success: false,
+          message: "Join the room first",
+        });
       }
 
+      // Validate announcement
       if (!announcementText || announcementText.length > 500) {
         return ack({
           success: false,
@@ -264,7 +263,10 @@ io.on("connection", (socket) => {
         });
       }
 
-      const room = await Room.findOne({ roomId: roomCode }).select("hostId");
+      // Fetch the actual room and verify its host
+      const room = await Room.findOne({ roomId: roomCode }).select(
+        "hostId participants"
+      );
 
       if (!room) {
         return ack({ success: false, message: "Room not found" });
@@ -292,10 +294,13 @@ io.on("connection", (socket) => {
         }),
       };
 
+      // Broadcast to everyone currently in the room
       io.to(roomCode).emit("room:announcement", announcement);
+
       return ack({ success: true });
     } catch (error) {
       console.error("Announcement error:", error.message);
+
       return ack({
         success: false,
         message: "Unable to send announcement",
@@ -303,33 +308,16 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("disconnect", (reason) => {
-    console.log("Socket disconnected:", socket.id, reason);
+
+
+  socket.on("disconnect", () => {
+    console.log("Socket disconnected:", socket.id);
   });
 });
 
-// Connect to MongoDB before accepting traffic.
-async function startServer() {
-  try {
-    if (!mongoURL) {
-      throw new Error("MONGO_URL is missing from environment variables");
-    }
 
-    if (!process.env.JWT_SECRET) {
-      throw new Error("JWT_SECRET is missing from environment variables");
-    }
-
-    await mongoose.connect(mongoURL);
-    console.log("MongoDB connected successfully");
-
-    server.listen(port, () => {
-      console.log(`Server is listening on port ${port}`);
-      console.log("Socket.IO is ready");
-    });
-  } catch (error) {
-    console.error("Server startup error:", error.message);
-    process.exit(1);
-  }
-}
-
-startServer();
+// Start HTTP + Socket.IO server
+server.listen(port, () => {
+  console.log(`Server is listening on http://localhost:${port}`);
+  console.log("Socket.IO is ready");
+});

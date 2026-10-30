@@ -3,28 +3,13 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const Room = require("../models/room.model");
 
-// Helper: Validate authenticated user ID
-const getUserId = (req) => {
-  return (
-    req.user?.userid ||
-    req.user?.id ||
-    req.user?.userId ||
-    req.user?._id
-  );
-};
-
 // CREATE ROOM
 const createRoom = async (req, res) => {
   try {
-    const { name } = req.body;
-    const userId = getUserId(req);
 
-    if (!userId || !mongoose.isValidObjectId(userId)) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid user authentication",
-      });
-    }
+    
+    const { name } = req.body;
+    const userId = req.user.userid;
 
     if (typeof name !== "string" || !name.trim()) {
       return res.status(400).json({
@@ -66,14 +51,7 @@ const createRoom = async (req, res) => {
 const joinRoom = async (req, res) => {
   try {
     const { roomCode } = req.body;
-    const userId = getUserId(req);
-
-    if (!userId || !mongoose.isValidObjectId(userId)) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid user authentication",
-      });
-    }
+    const userId = req.user.userid;
 
     if (typeof roomCode !== "string" || !roomCode.trim()) {
       return res.status(400).json({
@@ -82,10 +60,8 @@ const joinRoom = async (req, res) => {
       });
     }
 
-    const normalizedRoomCode = roomCode.trim().toUpperCase();
-
     const room = await Room.findOne({
-      roomId: normalizedRoomCode,
+      roomId: roomCode.trim().toUpperCase(),
     });
 
     if (!room) {
@@ -96,8 +72,7 @@ const joinRoom = async (req, res) => {
     }
 
     const alreadyJoined = room.participants.some(
-      (participant) =>
-        String(participant.userId) === String(userId)
+      (participant) => participant.userId.toString() === userId
     );
 
     if (alreadyJoined) {
@@ -133,9 +108,9 @@ const joinRoom = async (req, res) => {
 // GET MY ROOMS
 const getMyRooms = async (req, res) => {
   try {
-    const userId = getUserId(req);
+    const userId = req.user.userid;
 
-    if (!userId || !mongoose.isValidObjectId(userId)) {
+    if (!mongoose.isValidObjectId(userId)) {
       return res.status(401).json({
         success: false,
         message: "Invalid user authentication",
@@ -161,25 +136,12 @@ const getMyRooms = async (req, res) => {
   }
 };
 
+// get room detailes
 // GET ROOM DETAILS
 const getRoomDetails = async (req, res) => {
   try {
     const { roomCode } = req.params;
-    const userId = getUserId(req);
-
-    if (!userId || !mongoose.isValidObjectId(userId)) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid user authentication",
-      });
-    }
-
-    if (typeof roomCode !== "string" || !roomCode.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Room code is required",
-      });
-    }
+    const userId = req.user.userid;
 
     const room = await Room.findOne({
       roomId: roomCode.trim().toUpperCase(),
@@ -193,8 +155,7 @@ const getRoomDetails = async (req, res) => {
     }
 
     const isMember = room.participants.some(
-      (participant) =>
-        String(participant.userId) === String(userId)
+      (participant) => participant.userId.toString() === userId
     );
 
     if (!isMember) {
@@ -218,38 +179,22 @@ const getRoomDetails = async (req, res) => {
   }
 };
 
-// UPDATE ROOM VIDEO
-// Only HOST can change the YouTube video.
-// All connected room members receive the video change event.
+
 const updateRoomVideo = async (req, res) => {
   try {
     const { roomCode } = req.params;
     const { youtubeUrl } = req.body;
 
-    const userId = getUserId(req);
+  
 
-    if (!userId || !mongoose.isValidObjectId(userId)) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid user authentication",
-      });
-    }
-
-    if (typeof roomCode !== "string" || !roomCode.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Room code is required.",
-      });
-    }
-
-    if (typeof youtubeUrl !== "string" || !youtubeUrl.trim()) {
+    // Validate the YouTube URL
+    if (!youtubeUrl || typeof youtubeUrl !== "string") {
       return res.status(400).json({
         success: false,
         message: "Please provide a YouTube URL.",
       });
     }
 
-    // Validate YouTube URL
     let parsedUrl;
 
     try {
@@ -266,7 +211,6 @@ const updateRoomVideo = async (req, res) => {
       "www.youtube.com",
       "m.youtube.com",
       "youtu.be",
-      "www.youtu.be",
       "www.youtube-nocookie.com",
     ];
 
@@ -280,23 +224,16 @@ const updateRoomVideo = async (req, res) => {
       });
     }
 
-    // Extract YouTube video ID
     let videoId = "";
 
-    if (
-      parsedUrl.hostname === "youtu.be" ||
-      parsedUrl.hostname === "www.youtu.be"
-    ) {
-      videoId =
-        parsedUrl.pathname.split("/").filter(Boolean)[0] || "";
+    if (parsedUrl.hostname === "youtu.be") {
+      videoId = parsedUrl.pathname.split("/").filter(Boolean)[0] || "";
     } else {
       const parts = parsedUrl.pathname.split("/").filter(Boolean);
 
       if (parts[0] === "watch") {
         videoId = parsedUrl.searchParams.get("v") || "";
-      } else if (
-        ["embed", "shorts", "live"].includes(parts[0])
-      ) {
+      } else if (["embed", "shorts", "live"].includes(parts[0])) {
         videoId = parts[1] || "";
       }
     }
@@ -308,12 +245,8 @@ const updateRoomVideo = async (req, res) => {
       });
     }
 
-    // Find room
-    const normalizedRoomCode = roomCode.trim().toUpperCase();
-
-    const room = await Room.findOne({
-      roomId: normalizedRoomCode,
-    });
+    // Find the room
+    const room = await Room.findOne({ roomId: roomCode });
 
     if (!room) {
       return res.status(404).json({
@@ -322,36 +255,30 @@ const updateRoomVideo = async (req, res) => {
       });
     }
 
-    // Check HOST permission
-    if (String(room.hostId) !== String(userId)) {
-      return res.status(403).json({
-        success: false,
-        message: "Only the host can change the video.",
-      });
-    }
+    // Only the host can change the video
+   const userId =
+  req.user?.userid ||
+  req.user?.id ||
+  req.user?.userId ||
+  req.user?._id;
 
-    // Save new video and reset playback
+console.log("Authenticated user:", req.user);
+console.log("Extracted user ID:", userId);
+console.log("Database host ID:", String(room.hostId));
+
+if (!userId || String(room.hostId) !== String(userId)) {
+  return res.status(403).json({
+    success: false,
+    message: "Only the host can change the video.",
+  });
+}
+
+    // Save the video ID in MongoDB
     room.videoId = videoId;
     room.currentTime = 0;
     room.isPlaying = false;
 
     await room.save();
-
-    // Broadcast new video to all connected room members
-    const io = req.app.get("io");
-
-    if (io) {
-      io.to(room.roomId).emit("room:video:changed", {
-        roomCode: room.roomId,
-        videoId: room.videoId,
-        currentTime: 0,
-        isPlaying: false,
-      });
-    } else {
-      console.error(
-        "Socket.IO instance was not found on the Express app."
-      );
-    }
 
     return res.status(200).json({
       success: true,
@@ -368,11 +295,11 @@ const updateRoomVideo = async (req, res) => {
   }
 };
 
-// EXPORT CONTROLLERS
+
 module.exports = {
   createRoom,
   joinRoom,
   getMyRooms,
   getRoomDetails,
-  updateRoomVideo,
+  updateRoomVideo
 };
